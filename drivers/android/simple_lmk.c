@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2019-2020 Sultan Alsawaf <sultan@kerneltoast.com>.
+ * Copyright (C) 2019-2021 Sultan Alsawaf <sultan@kerneltoast.com>.
  */
 
 #define pr_fmt(fmt) "simple_lmk: " fmt
@@ -27,33 +27,16 @@ struct victim_info {
 	unsigned long size;
 };
 
-/* Pulled from the Android framework. Lower adj means higher priority. */
-static const short adjs[] = {
-	1000, /* CACHED_APP_MAX_ADJ + 1 */
-	950,  /* CACHED_APP_LMK_FIRST_ADJ */
-	900,  /* CACHED_APP_MIN_ADJ */
-	800,  /* SERVICE_B_ADJ */
-	700,  /* PREVIOUS_APP_ADJ */
-	600,  /* HOME_APP_ADJ */
-	500,  /* SERVICE_ADJ */
-	400,  /* HEAVY_WEIGHT_APP_ADJ */
-	300,  /* BACKUP_APP_ADJ */
-	250,  /* PERCEPTIBLE_LOW_APP_ADJ */
-	200,  /* PERCEPTIBLE_APP_ADJ */
-	100,  /* VISIBLE_APP_ADJ */
-	50,   /* PERCEPTIBLE_RECENT_FOREGROUND_APP_ADJ */
-	0     /* FOREGROUND_APP_ADJ */
-};
-
-static struct victim_info victims[MAX_VICTIMS];
+static struct victim_info victims[MAX_VICTIMS] __cacheline_aligned_in_smp;
+static struct task_struct *task_bucket[SHRT_MAX + 1] __cacheline_aligned;
 static DECLARE_WAIT_QUEUE_HEAD(oom_waitq);
 static DECLARE_COMPLETION(reclaim_done);
-static DEFINE_RWLOCK(mm_free_lock);
-static int victims_to_kill;
+static __cacheline_aligned_in_smp DEFINE_RWLOCK(mm_free_lock);
+static int nr_victims;
 static atomic_t needs_reclaim = ATOMIC_INIT(0);
 static atomic_t nr_killed = ATOMIC_INIT(0);
 
-static int victim_size_cmp(const void *lhs_ptr, const void *rhs_ptr)
+static int victim_cmp(const void *lhs_ptr, const void *rhs_ptr)
 {
 	const struct victim_info *lhs = (typeof(lhs))lhs_ptr;
 	const struct victim_info *rhs = (typeof(rhs))rhs_ptr;
@@ -61,16 +44,12 @@ static int victim_size_cmp(const void *lhs_ptr, const void *rhs_ptr)
 	return rhs->size - lhs->size;
 }
 
-static bool vtsk_is_duplicate(int vlen, struct task_struct *vtsk)
+static void victim_swap(void *lhs_ptr, void *rhs_ptr, int size)
 {
-	int i;
+	struct victim_info *lhs = (typeof(lhs))lhs_ptr;
+	struct victim_info *rhs = (typeof(rhs))rhs_ptr;
 
-	for (i = 0; i < vlen; i++) {
-		if (same_thread_group(victims[i].tsk, vtsk))
-			return true;
-	}
-
-	return false;
+	swap(*lhs, *rhs);
 }
 
 static unsigned long get_total_mm_pages(struct mm_struct *mm)
@@ -84,64 +63,102 @@ static unsigned long get_total_mm_pages(struct mm_struct *mm)
 	return pages;
 }
 
-static unsigned long find_victims(int *vindex, short target_adj_min,
-				  short target_adj_max)
+static unsigned long find_victims(int *vindex)
 {
+	short i, min_adj = SHRT_MAX, max_adj = 0;
 	unsigned long pages_found = 0;
-	int old_vindex = *vindex;
 	struct task_struct *tsk;
 
+	rcu_read_lock();
 	for_each_process(tsk) {
 		struct signal_struct *sig;
-		struct task_struct *vtsk;
 		short adj;
 
 		/*
-		 * Search for suitable tasks with the targeted importance (adj).
+		 * Search for suitable tasks with a positive adj (importance).
 		 * Since only tasks with a positive adj can be targeted, that
 		 * naturally excludes tasks which shouldn't be killed, like init
 		 * and kthreads. Although oom_score_adj can still be changed
-		 * while this code runs, it doesn't really matter. We just need
-		 * to make sure that if the adj changes, we won't deadlock
-		 * trying to lock a task that we locked earlier.
+		 * while this code runs, it doesn't really matter; we just need
+		 * a snapshot of the task's adj.
 		 */
 		sig = tsk->signal;
 		adj = READ_ONCE(sig->oom_score_adj);
-		if (adj < target_adj_min || adj > target_adj_max - 1 ||
+		if (adj < 0 ||
 		    sig->flags & (SIGNAL_GROUP_EXIT | SIGNAL_GROUP_COREDUMP) ||
-		    (thread_group_empty(tsk) && tsk->flags & PF_EXITING) ||
-		    vtsk_is_duplicate(*vindex, tsk))
+		    (thread_group_empty(tsk) && tsk->flags & PF_EXITING))
 			continue;
 
-		vtsk = find_lock_task_mm(tsk);
-		if (!vtsk)
-			continue;
+		/* Store the task in a linked-list bucket based on its adj */
+		tsk->simple_lmk_next = task_bucket[adj];
+		task_bucket[adj] = tsk;
 
-		/* Store this potential victim away for later */
-		victims[*vindex].tsk = vtsk;
-		victims[*vindex].mm = vtsk->mm;
-		victims[*vindex].size = get_total_mm_pages(vtsk->mm);
-
-		/* Keep track of the number of pages that have been found */
-		pages_found += victims[*vindex].size;
-
-		/* Make sure there's space left in the victim array */
-		if (++*vindex == MAX_VICTIMS)
-			break;
+		/* Track the min and max adjs to speed up the loop below */
+		if (adj > max_adj)
+			max_adj = adj;
+		if (adj < min_adj)
+			min_adj = adj;
 	}
 
-	/*
-	 * Sort the victims in descending order of size to prioritize killing
-	 * the larger ones first.
-	 */
-	if (pages_found)
+	/* Start searching for victims from the highest adj (least important) */
+	for (i = max_adj; i >= min_adj; i--) {
+		int old_vindex;
+
+		tsk = task_bucket[i];
+		if (!tsk)
+			continue;
+
+		/* Clear out this bucket for the next time reclaim is done */
+		task_bucket[i] = NULL;
+
+		/* Iterate through every task with this adj */
+		old_vindex = *vindex;
+		do {
+			struct task_struct *vtsk;
+
+			vtsk = find_lock_task_mm(tsk);
+			if (!vtsk)
+				continue;
+
+			/* Store this potential victim away for later */
+			victims[*vindex].tsk = vtsk;
+			victims[*vindex].mm = vtsk->mm;
+			victims[*vindex].size = get_total_mm_pages(vtsk->mm);
+
+			/* Count the number of pages that have been found */
+			pages_found += victims[*vindex].size;
+
+			/* Make sure there's space left in the victim array */
+			if (++*vindex == MAX_VICTIMS)
+				break;
+		} while ((tsk = tsk->simple_lmk_next));
+
+		/* Go to the next bucket if nothing was found */
+		if (*vindex == old_vindex)
+			continue;
+
+		/*
+		 * Sort the victims in descending order of size to prioritize
+		 * killing the larger ones first.
+		 */
 		sort(&victims[old_vindex], *vindex - old_vindex,
-		     sizeof(*victims), victim_size_cmp, NULL);
+		     sizeof(*victims), victim_cmp, victim_swap);
+
+		/* Stop when we are out of space or have enough pages found */
+		if (*vindex == MAX_VICTIMS || pages_found >= MIN_FREE_PAGES) {
+			/* Zero out any remaining buckets we didn't touch */
+			if (i > min_adj)
+				memset(&task_bucket[min_adj], 0,
+				       (i - min_adj) * sizeof(*task_bucket));
+			break;
+		}
+	}
+	rcu_read_unlock();
 
 	return pages_found;
 }
 
-static int process_victims(int vlen, unsigned long pages_needed)
+static int process_victims(int vlen)
 {
 	unsigned long pages_found = 0;
 	int i, nr_to_kill = 0;
@@ -155,7 +172,7 @@ static int process_victims(int vlen, unsigned long pages_needed)
 		struct task_struct *vtsk = victim->tsk;
 
 		/* The victim's mm lock is taken in find_victims; release it */
-		if (pages_found >= pages_needed) {
+		if (pages_found >= MIN_FREE_PAGES) {
 			task_unlock(vtsk);
 		} else {
 			pages_found += victim->size;
@@ -166,46 +183,42 @@ static int process_victims(int vlen, unsigned long pages_needed)
 	return nr_to_kill;
 }
 
-static void scan_and_kill(unsigned long pages_needed)
+static void scan_and_kill(void)
 {
-	int i, nr_to_kill = 0, nr_victims = 0, ret;
-	unsigned long pages_found = 0;
+	int i, nr_to_kill, nr_found = 0;
+	unsigned long pages_found;
 
-	/*
-	 * Hold the tasklist lock so tasks don't disappear while scanning. This
-	 * is preferred to holding an RCU read lock so that the list of tasks
-	 * is guaranteed to be up to date.
-	 */
-	read_lock(&tasklist_lock);
-	for (i = 1; i < ARRAY_SIZE(adjs); i++) {
-		pages_found += find_victims(&nr_victims, adjs[i], adjs[i - 1]);
-		if (pages_found >= pages_needed || nr_victims == MAX_VICTIMS)
-			break;
-	}
-	read_unlock(&tasklist_lock);
-
-	/* Pretty unlikely but it can happen */
-	if (unlikely(!nr_victims)) {
+	/* Populate the victims array with tasks sorted by adj and then size */
+	pages_found = find_victims(&nr_found);
+	if (unlikely(!pages_found)) {
 		pr_err("No processes available to kill!\n");
 		return;
 	}
 
-	/* First round of victim processing to weed out unneeded victims */
-	nr_to_kill = process_victims(nr_victims, pages_needed);
+	/* Minimize the number of victims if we found more pages than needed */
+	if (pages_found > MIN_FREE_PAGES) {
+		/* First round of processing to weed out unneeded victims */
+		nr_to_kill = process_victims(nr_found);
 
-	/*
-	 * Try to kill as few of the chosen victims as possible by sorting the
-	 * chosen victims by size, which means larger victims that have a lower
-	 * adj can be killed in place of smaller victims with a high adj.
-	 */
-	sort(victims, nr_to_kill, sizeof(*victims), victim_size_cmp, NULL);
+		/*
+		 * Try to kill as few of the chosen victims as possible by
+		 * sorting the chosen victims by size, which means larger
+		 * victims that have a lower adj can be killed in place of
+		 * smaller victims with a high adj.
+		 */
+		sort(victims, nr_to_kill, sizeof(*victims), victim_cmp,
+		     victim_swap);
 
-	/* Second round of victim processing to finally select the victims */
-	nr_to_kill = process_victims(nr_to_kill, pages_needed);
+		/* Second round of processing to finally select the victims */
+		nr_to_kill = process_victims(nr_to_kill);
+	} else {
+		/* Too few pages found, so all the victims need to be killed */
+		nr_to_kill = nr_found;
+	}
 
 	/* Store the final number of victims for simple_lmk_mm_freed() */
 	write_lock(&mm_free_lock);
-	victims_to_kill = nr_to_kill;
+	nr_victims = nr_to_kill;
 	write_unlock(&mm_free_lock);
 
 	/* Kill the victims */
@@ -238,15 +251,13 @@ static void scan_and_kill(unsigned long pages_needed)
 	}
 
 	/* Wait until all the victims die or until the timeout is reached */
-	ret = wait_for_completion_timeout(&reclaim_done, RECLAIM_EXPIRES);
+	if (!wait_for_completion_timeout(&reclaim_done, RECLAIM_EXPIRES))
+		pr_info("Timeout hit waiting for victims to die, proceeding\n");
+
+	/* Clean up for future reclaim invocations */
 	write_lock(&mm_free_lock);
-	if (!ret) {
-		/* Extra clean-up is needed when the timeout is hit */
-		reinit_completion(&reclaim_done);
-		for (i = 0; i < nr_to_kill; i++)
-			victims[i].mm = NULL;
-	}
-	victims_to_kill = 0;
+	reinit_completion(&reclaim_done);
+	nr_victims = 0;
 	nr_killed = (atomic_t)ATOMIC_INIT(0);
 	write_unlock(&mm_free_lock);
 }
@@ -261,7 +272,7 @@ static int simple_lmk_reclaim_thread(void *data)
 
 	while (1) {
 		wait_event(oom_waitq, atomic_read(&needs_reclaim));
-		scan_and_kill(MIN_FREE_PAGES);
+		scan_and_kill();
 		atomic_set_release(&needs_reclaim, 0);
 	}
 
@@ -272,15 +283,17 @@ void simple_lmk_mm_freed(struct mm_struct *mm)
 {
 	int i;
 
-	read_lock(&mm_free_lock);
-	for (i = 0; i < victims_to_kill; i++) {
-		if (victims[i].mm != mm)
-			continue;
+	/* Nothing to do when reclaim is starting or ending */
+	if (!read_trylock(&mm_free_lock))
+		return;
 
-		victims[i].mm = NULL;
-		if (atomic_inc_return_relaxed(&nr_killed) == victims_to_kill)
-			complete(&reclaim_done);
-		break;
+	for (i = 0; i < nr_victims; i++) {
+		if (victims[i].mm == mm) {
+			victims[i].mm = NULL;
+			if (atomic_inc_return_relaxed(&nr_killed) == nr_victims)
+				complete(&reclaim_done);
+			break;
+		}
 	}
 	read_unlock(&mm_free_lock);
 }
@@ -306,8 +319,8 @@ static int simple_lmk_init_set(const char *val, const struct kernel_param *kp)
 	struct task_struct *thread;
 
 	if (!atomic_cmpxchg(&init_done, 0, 1)) {
-		thread = kthread_run_perf_critical(simple_lmk_reclaim_thread,
-						   NULL, "simple_lmkd");
+		thread = kthread_run(simple_lmk_reclaim_thread, NULL,
+				     "simple_lmkd");
 		BUG_ON(IS_ERR(thread));
 		BUG_ON(vmpressure_notifier_register(&vmpressure_notif));
 	}

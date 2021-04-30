@@ -69,6 +69,8 @@
 #include <asm/div64.h>
 #include "internal.h"
 
+atomic_long_t kswapd_waiters = ATOMIC_LONG_INIT(0);
+
 /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
 static DEFINE_MUTEX(pcp_batch_high_lock);
 #define MIN_PERCPU_PAGELIST_FRACTION	(8)
@@ -3136,7 +3138,6 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	enum migrate_mode migration_mode = MIGRATE_ASYNC;
 	bool deferred_compaction = false;
 	int contended_compaction = COMPACT_CONTENDED_NONE;
-	pg_data_t *pgdat = ac->preferred_zone->zone_pgdat;
 	bool woke_kswapd = false;
 
 	/*
@@ -3169,7 +3170,7 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 retry:
 	if (gfp_mask & __GFP_KSWAPD_RECLAIM) {
 		if (!woke_kswapd) {
-			atomic_inc(&pgdat->kswapd_waiters);
+			atomic_long_inc(&kswapd_waiters);
 			woke_kswapd = true;
 		}
 		wake_all_kswapds(order, ac);
@@ -3229,8 +3230,10 @@ retry:
 		goto nopage;
 
 	/* Avoid allocations with no watermarks from looping endlessly */
-	if (test_thread_flag(TIF_MEMDIE) && !(gfp_mask & __GFP_NOFAIL))
+	if (test_thread_flag(TIF_MEMDIE) && !(gfp_mask & __GFP_NOFAIL)) {
+		gfp_mask |= __GFP_NOWARN;
 		goto nopage;
+	}
 
 	/*
 	 * Try direct compaction. The first pass is asynchronous. Subsequent
@@ -3328,7 +3331,7 @@ noretry:
 nopage:
 got_pg:
 	if (woke_kswapd)
-		atomic_dec(&pgdat->kswapd_waiters);
+		atomic_long_dec(&kswapd_waiters);
 	if (!page)
 		warn_alloc_failed(gfp_mask, order, NULL);
 	return page;
