@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, 2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -609,6 +609,10 @@ int q6audio_get_port_id(u16 port_id)
 		return AFE_PORT_ID_INT6_MI2S_RX;
 	case AFE_PORT_ID_INT6_MI2S_TX:
 		return AFE_PORT_ID_INT6_MI2S_TX;
+	case RT_PROXY_PORT_002_RX:
+		return RT_PROXY_PORT_002_RX;
+	case RT_PROXY_PORT_002_TX:
+		return RT_PROXY_PORT_002_TX;
 	default:
 		pr_warn("%s: Invalid port_id %d\n", __func__, port_id);
 		return -EINVAL;
@@ -948,6 +952,8 @@ int q6audio_validate_port(u16 port_id)
 	case AFE_PORT_ID_QUATERNARY_MI2S_TX_2:
 	case AFE_PORT_ID_QUATERNARY_MI2S_TX_3:
 	case AFE_PORT_ID_QUATERNARY_MI2S_TX_4:
+	case RT_PROXY_PORT_002_RX:
+	case RT_PROXY_PORT_002_TX:
 	{
 		ret = 0;
 		break;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -4290,8 +4290,9 @@ static int fg_bcl_reset(struct fg_chip *chip)
 		} else {
 			rc = fg_dma_mem_req(chip, false);
 			if (rc < 0) {
-				pr_err("Error in unlocking memory, rc=%d\n", rc);
-				return rc;
+				pr_err("Error in unlocking memory, rc=%d\n",
+						rc);
+				goto unlock;
 			}
 			success = false;
 			pr_err_ratelimited("PEEK_MUX1 not set retrying...\n");
@@ -4422,6 +4423,13 @@ static int fg_psy_set_property(struct power_supply *psy,
 		rc = fg_set_jeita_threshold(chip, JEITA_HOT, pval->intval);
 		if (rc < 0) {
 			pr_err("Error in writing jeita_hot, rc=%d\n", rc);
+			return rc;
+		}
+		break;
+	case POWER_SUPPLY_PROP_FG_RESET_CLOCK:
+		rc = fg_bcl_reset(chip);
+		if (rc < 0) {
+			pr_err("Error in resetting BCL clock, rc=%d\n", rc);
 			return rc;
 		}
 		break;
