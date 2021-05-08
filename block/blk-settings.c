@@ -350,7 +350,7 @@ EXPORT_SYMBOL(blk_queue_max_segment_size);
  *   storage device can address.  The default of 512 covers most
  *   hardware.
  **/
-void blk_queue_logical_block_size(struct request_queue *q, unsigned short size)
+void blk_queue_logical_block_size(struct request_queue *q, unsigned int size)
 {
 	q->limits.logical_block_size = size;
 
@@ -495,6 +495,14 @@ void blk_queue_stack_limits(struct request_queue *t, struct request_queue *b)
 }
 EXPORT_SYMBOL(blk_queue_stack_limits);
 
+static unsigned int blk_round_down_sectors(unsigned int sectors, unsigned int lbs)
+{
+	sectors = round_down(sectors, lbs >> SECTOR_SHIFT);
+	if (sectors < PAGE_SIZE >> SECTOR_SHIFT)
+		sectors = PAGE_SIZE >> SECTOR_SHIFT;
+	return sectors;
+}
+
 /**
  * blk_stack_limits - adjust queue_limits for stacked devices
  * @t:	the stacking driver limits (top device)
@@ -606,6 +614,10 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 		t->misaligned = 1;
 		ret = -1;
 	}
+
+	t->max_sectors = blk_round_down_sectors(t->max_sectors, t->logical_block_size);
+	t->max_hw_sectors = blk_round_down_sectors(t->max_hw_sectors, t->logical_block_size);
+	t->max_dev_sectors = blk_round_down_sectors(t->max_dev_sectors, t->logical_block_size);
 
 	/* Discard alignment and granularity */
 	if (b->discard_granularity) {
@@ -821,35 +833,51 @@ void blk_queue_update_dma_alignment(struct request_queue *q, int mask)
 }
 EXPORT_SYMBOL(blk_queue_update_dma_alignment);
 
-/**
- * blk_queue_flush - configure queue's cache flush capability
- * @q:		the request queue for the device
- * @flush:	0, REQ_FLUSH or REQ_FLUSH | REQ_FUA | REQ_BARRIER
- *
- * Tell block layer cache flush capability of @q.  If it supports
- * flushing, REQ_FLUSH should be set.  If it supports bypassing
- * write cache for individual writes, REQ_FUA should be set. If cache
- * barrier is supported set REQ_BARRIER.
- */
-void blk_queue_flush(struct request_queue *q, unsigned int flush)
-{
-	WARN_ON_ONCE(flush & ~(REQ_FLUSH | REQ_FUA | REQ_BARRIER));
-
-	if (WARN_ON_ONCE(!(flush & REQ_FLUSH) && ((flush & REQ_FUA) ||
-			(flush & REQ_BARRIER)))) {
-		flush &= ~REQ_FUA;
-		flush &= ~REQ_BARRIER;
-	}
-
-	q->flush_flags = flush & (REQ_FLUSH | REQ_FUA | REQ_BARRIER);
-}
-EXPORT_SYMBOL_GPL(blk_queue_flush);
-
 void blk_queue_flush_queueable(struct request_queue *q, bool queueable)
 {
-	q->flush_not_queueable = !queueable;
+	spin_lock_irq(q->queue_lock);
+	if (queueable)
+		clear_bit(QUEUE_FLAG_FLUSH_NQ, &q->queue_flags);
+	else
+		set_bit(QUEUE_FLAG_FLUSH_NQ, &q->queue_flags);
+	spin_unlock_irq(q->queue_lock);
 }
 EXPORT_SYMBOL_GPL(blk_queue_flush_queueable);
+
+/**
+ * blk_set_queue_depth - tell the block layer about the device queue depth
+ * @q:		the request queue for the device
+ * @depth:		queue depth
+ *
+ */
+void blk_set_queue_depth(struct request_queue *q, unsigned int depth)
+{
+	q->queue_depth = depth;
+}
+EXPORT_SYMBOL(blk_set_queue_depth);
+
+/**
+ * blk_queue_write_cache - configure queue's write cache
+ * @q:		the request queue for the device
+ * @wc:		write back cache on or off
+ * @fua:	device supports FUA writes, if true
+ *
+ * Tell the block layer about the write cache of @q.
+ */
+void blk_queue_write_cache(struct request_queue *q, bool wc, bool fua)
+{
+	spin_lock_irq(q->queue_lock);
+	if (wc)
+		queue_flag_set(QUEUE_FLAG_WC, q);
+	else
+		queue_flag_clear(QUEUE_FLAG_WC, q);
+	if (fua)
+		queue_flag_set(QUEUE_FLAG_FUA, q);
+	else
+		queue_flag_clear(QUEUE_FLAG_FUA, q);
+	spin_unlock_irq(q->queue_lock);
+}
+EXPORT_SYMBOL_GPL(blk_queue_write_cache);
 
 static int __init blk_settings_init(void)
 {

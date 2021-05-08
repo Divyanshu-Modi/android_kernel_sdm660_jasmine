@@ -1988,7 +1988,7 @@ struct wcd_cpe_core *wcd_cpe_init(const char *img_fname,
 
 	card = codec->component.card->snd_card;
 	snprintf(proc_name, sizeof(proc_name), "%s%d%s", cpe_name, id,
-		state_name);
+		 state_name);
 	entry = snd_info_create_card_entry(card, proc_name,
 					   card->proc_root);
 	if (entry) {
@@ -2406,7 +2406,7 @@ static int wcd_cpe_cmd_lsm_open_tx_v2(
 	cmd_open_tx_v2.topology_id = lsm_top->topology;
 	ret = wcd_cpe_cmi_send_lsm_msg(core, session, &cmd_open_tx_v2);
 	if (ret)
-		dev_err(core->dev,
+		dev_dbg(core->dev,
 			"%s: failed to send open_tx_v2 cmd, err = %d\n",
 			__func__, ret);
 	else

@@ -314,7 +314,8 @@ static int __power_supply_is_system_supplied(struct device *dev, void *data)
 	unsigned int *count = data;
 
 	(*count)++;
-	if (psy->desc->type != POWER_SUPPLY_TYPE_BATTERY)
+	if (psy->desc->type != POWER_SUPPLY_TYPE_BATTERY &&
+		psy->desc->type != POWER_SUPPLY_TYPE_BMS)
 		if (!psy->desc->get_property(psy, POWER_SUPPLY_PROP_ONLINE,
 					&ret))
 			return ret.intval;
@@ -755,13 +756,13 @@ __power_supply_register(struct device *parent,
 	}
 
 	spin_lock_init(&psy->changed_lock);
-	rc = device_init_wakeup(dev, ws);
-	if (rc)
-		goto wakeup_init_failed;
-
 	rc = device_add(dev);
 	if (rc)
 		goto device_add_failed;
+
+	rc = device_init_wakeup(dev, ws);
+	if (rc)
+		goto wakeup_init_failed;
 
 	rc = psy_register_thermal(psy);
 	if (rc)
@@ -798,8 +799,8 @@ register_cooler_failed:
 	psy_unregister_thermal(psy);
 register_thermal_failed:
 	device_del(dev);
-device_add_failed:
 wakeup_init_failed:
+device_add_failed:
 check_supplies_failed:
 dev_set_name_failed:
 	put_device(dev);

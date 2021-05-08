@@ -213,15 +213,8 @@ typedef void (dax_iodone_t)(struct buffer_head *bh_map, int uptodate);
 #define WRITE_SYNC		(WRITE | REQ_SYNC | REQ_NOIDLE)
 #define WRITE_ODIRECT		(WRITE | REQ_SYNC)
 #define WRITE_FLUSH		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH)
-#define WRITE_FLUSH_BARRIER	(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH | \
-					REQ_BARRIER)
 #define WRITE_FUA		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FUA)
 #define WRITE_FLUSH_FUA		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH | REQ_FUA)
-#define WRITE_POST_FLUSH_BARRIER	(WRITE | REQ_SYNC | REQ_NOIDLE | \
-					 REQ_POST_FLUSH_BARRIER | REQ_BARRIER)
-#define WRITE_ORDERED_FLUSH_BARRIER	(WRITE | REQ_SYNC | REQ_NOIDLE | \
-					 REQ_FLUSH | REQ_POST_FLUSH_BARRIER | \
-					 REQ_BARRIER)
 
 /*
  * Attribute flags.  These should be or-ed together to figure out what
@@ -689,6 +682,7 @@ struct inode {
 		struct rcu_head		i_rcu;
 	};
 	u64			i_version;
+	atomic64_t		i_sequence; /* see futex */
 	atomic_t		i_count;
 	atomic_t		i_dio_count;
 	atomic_t		i_writecount;
@@ -946,13 +940,13 @@ struct file {
 #ifdef CONFIG_FILE_TABLE_DEBUG
 	struct hlist_node f_hash;
 #endif /* #ifdef CONFIG_FILE_TABLE_DEBUG */
-} __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+} __attribute__((aligned(8)));
 
 struct file_handle {
 	__u32 handle_bytes;
 	int handle_type;
 	/* file identifier */
-	unsigned char f_handle[0];
+	unsigned char f_handle[];
 };
 
 static inline struct file *get_file(struct file *f)
@@ -1935,6 +1929,10 @@ struct super_operations {
  *			wb stat updates to grab mapping->tree_lock.  See
  *			inode_switch_wb_work_fn() for details.
  *
+ * I_SYNC_QUEUED	Inode is queued in b_io or b_more_io writeback lists.
+ *			Used to detect that mark_inode_dirty() should not move
+ * 			inode between dirty lists.
+ *
  * Q: What is the difference between I_WILL_FREE and I_FREEING?
  */
 #define I_DIRTY_SYNC		(1 << 0)
@@ -1952,9 +1950,9 @@ struct super_operations {
 #define I_DIO_WAKEUP		(1 << __I_DIO_WAKEUP)
 #define I_LINKABLE		(1 << 10)
 #define I_DIRTY_TIME		(1 << 11)
-#define __I_DIRTY_TIME_EXPIRED	12
-#define I_DIRTY_TIME_EXPIRED	(1 << __I_DIRTY_TIME_EXPIRED)
+#define I_DIRTY_TIME_EXPIRED	(1 << 12)
 #define I_WB_SWITCH		(1 << 13)
+#define I_SYNC_QUEUED		(1 << 17)
 
 #define I_DIRTY (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_PAGES)
 #define I_DIRTY_ALL (I_DIRTY | I_DIRTY_TIME)

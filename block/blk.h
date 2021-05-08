@@ -64,8 +64,6 @@ void blk_exit_rl(struct request_list *rl);
 void init_request_from_bio(struct request *req, struct bio *bio);
 void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
 			struct bio *bio);
-int blk_rq_append_bio(struct request_queue *q, struct request *rq,
-		      struct bio *bio);
 void blk_queue_bypass_start(struct request_queue *q);
 void blk_queue_bypass_end(struct request_queue *q);
 void blk_dequeue_request(struct request *rq);
@@ -261,9 +259,7 @@ extern int blk_update_nr_requests(struct request_queue *, unsigned int);
  */
 static inline int blk_do_io_stat(struct request *rq)
 {
-	return rq->rq_disk &&
-	       (rq->cmd_flags & REQ_IO_STAT) &&
-		(rq->cmd_type == REQ_TYPE_FS);
+	return false;
 }
 
 /*

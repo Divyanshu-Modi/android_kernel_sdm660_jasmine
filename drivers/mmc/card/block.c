@@ -1290,8 +1290,10 @@ static int mmc_blk_ioctl_multi_cmd(struct block_device *bdev,
 	}
 
 	md = mmc_blk_get(bdev->bd_disk);
-	if (!md)
+	if (!md) {
+		err = -EINVAL;
 		goto cmd_err;
+	}
 
 	card = md->queue.card;
 	if (IS_ERR(card)) {
@@ -4305,7 +4307,7 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 	    ((card->ext_csd.rel_param & EXT_CSD_WR_REL_PARAM_EN) ||
 	     card->ext_csd.rel_sectors)) {
 		md->flags |= MMC_BLK_REL_WR;
-		blk_queue_flush(md->queue.queue, REQ_FLUSH | REQ_FUA);
+		blk_queue_write_cache(md->queue.queue, true, true);
 	}
 
 	if (card->cmdq_init) {

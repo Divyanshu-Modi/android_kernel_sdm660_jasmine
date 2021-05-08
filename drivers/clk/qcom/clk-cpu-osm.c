@@ -2506,38 +2506,6 @@ fail:
 	return NULL;
 }
 
-static u64 clk_osm_get_cpu_cycle_counter(int cpu)
-{
-	struct clk_osm *c;
-	u32 val;
-	unsigned long flags;
-
-	if (logical_cpu_to_clk(cpu) == pwrcl_clk.hw.clk)
-		c = &pwrcl_clk;
-	else if (logical_cpu_to_clk(cpu) == perfcl_clk.hw.clk)
-		c = &perfcl_clk;
-	else {
-		pr_err("no clock device for CPU=%d\n", cpu);
-		return 0;
-	}
-
-	spin_lock_irqsave(&c->lock, flags);
-	val = clk_osm_read_reg_no_log(c, OSM_CYCLE_COUNTER_STATUS_REG);
-
-	if (val < c->prev_cycle_counter) {
-		/* Handle counter overflow */
-		c->total_cycle_counter += UINT_MAX -
-			c->prev_cycle_counter + val;
-		c->prev_cycle_counter = val;
-	} else {
-		c->total_cycle_counter += val - c->prev_cycle_counter;
-		c->prev_cycle_counter = val;
-	}
-	spin_unlock_irqrestore(&c->lock, flags);
-
-	return c->total_cycle_counter;
-}
-
 static void populate_opp_table(struct platform_device *pdev)
 {
 	int cpu;
@@ -3120,15 +3088,14 @@ static int clk_osm_acd_init(struct clk_osm *c)
 
 static unsigned long init_rate = 300000000;
 static unsigned long osm_clk_init_rate = 200000000;
-static unsigned long pwrcl_boot_rate = 1401600000;
-static unsigned long perfcl_boot_rate = 1747200000;
+static unsigned long pwrcl_boot_rate = 1843200000;
+static unsigned long perfcl_boot_rate = 2150400000;
 
 static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 {
 	int rc = 0, cpu, i;
-	int speedbin = 0, pvs_ver = 0;
+	int speedbin = 1, pvs_ver = 0;
 	bool is_sdm630 = 0;
-	u32 pte_efuse;
 	int num_clks = ARRAY_SIZE(osm_qcom_clk_hws);
 	struct clk *clk;
 	struct clk *ext_xo_clk, *ext_hmss_gpll0_clk_src;
@@ -3136,9 +3103,6 @@ static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 	struct clk_onecell_data *clk_data;
 	char perfclspeedbinstr[] = "qcom,perfcl-speedbin0-v0";
 	char pwrclspeedbinstr[] = "qcom,pwrcl-speedbin0-v0";
-	struct cpu_cycle_counter_cb cb = {
-		.get_cpu_cycle_counter = clk_osm_get_cpu_cycle_counter,
-	};
 
 	/*
 	 * Require the RPM-XO clock and GCC-HMSS-GPLL0 clocks to be registererd
@@ -3186,9 +3150,6 @@ static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 
 	if (pwrcl_clk.vbases[EFUSE_BASE]) {
 		/* Multiple speed-bins are supported */
-		pte_efuse = readl_relaxed(pwrcl_clk.vbases[EFUSE_BASE]);
-		speedbin = ((pte_efuse >> PWRCL_EFUSE_SHIFT) &
-						    PWRCL_EFUSE_MASK);
 		snprintf(pwrclspeedbinstr, ARRAY_SIZE(pwrclspeedbinstr),
 			 "qcom,pwrcl-speedbin%d-v%d", speedbin, pvs_ver);
 	}
@@ -3205,9 +3166,6 @@ static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 
 	if (perfcl_clk.vbases[EFUSE_BASE]) {
 		/* Multiple speed-bins are supported */
-		pte_efuse = readl_relaxed(perfcl_clk.vbases[EFUSE_BASE]);
-		speedbin = ((pte_efuse >> PERFCL_EFUSE_SHIFT) &
-							PERFCL_EFUSE_MASK);
 		snprintf(perfclspeedbinstr, ARRAY_SIZE(perfclspeedbinstr),
 			 "qcom,perfcl-speedbin%d-v%d", speedbin, pvs_ver);
 	}
@@ -3391,10 +3349,6 @@ static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 
 	is_sdm630 = of_device_is_compatible(pdev->dev.of_node,
 					"qcom,clk-cpu-osm-sdm630");
-	if (is_sdm630) {
-		pwrcl_boot_rate = 1382400000;
-		perfcl_boot_rate = 1670400000;
-	}
 
 	/* Set final boot rate */
 	rc = clk_set_rate(pwrcl_clk.hw.clk, pwrcl_boot_rate);
@@ -3416,8 +3370,6 @@ static int clk_cpu_osm_driver_probe(struct platform_device *pdev)
 	populate_debugfs_dir(&perfcl_clk);
 
 	of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
-
-	register_cpu_cycle_counter_cb(&cb);
 
 	pr_info("OSM driver inited\n");
 	put_online_cpus();

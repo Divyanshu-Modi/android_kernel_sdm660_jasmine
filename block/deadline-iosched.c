@@ -39,7 +39,6 @@ struct deadline_data {
 	 */
 	struct request *next_rq[2];
 	unsigned int batching;		/* number of sequential requests made */
-	sector_t last_sector;		/* head position */
 	unsigned int starved;		/* times reads have starved writes */
 
 	/*
@@ -138,7 +137,7 @@ deadline_merge(struct request_queue *q, struct request **req, struct bio *bio)
 		if (__rq) {
 			BUG_ON(sector != blk_rq_pos(__rq));
 
-			if (elv_rq_merge_ok(__rq, bio)) {
+			if (elv_bio_merge_ok(__rq, bio)) {
 				ret = ELEVATOR_FRONT_MERGE;
 				goto out;
 			}
@@ -174,7 +173,8 @@ deadline_merged_requests(struct request_queue *q, struct request *req,
 	 * and move into next position (next will be deleted) in fifo
 	 */
 	if (!list_empty(&req->queuelist) && !list_empty(&next->queuelist)) {
-		if (time_before(next->fifo_time, req->fifo_time)) {
+		if (time_before((unsigned long)next->fifo_time,
+				(unsigned long)req->fifo_time)) {
 			list_move(&req->queuelist, &next->queuelist);
 			req->fifo_time = next->fifo_time;
 		}
@@ -210,8 +210,6 @@ deadline_move_request(struct deadline_data *dd, struct request *rq)
 	dd->next_rq[WRITE] = NULL;
 	dd->next_rq[data_dir] = deadline_latter_request(rq);
 
-	dd->last_sector = rq_end_sector(rq);
-
 	/*
 	 * take it off the sort and fifo list, move
 	 * to dispatch queue
@@ -230,7 +228,7 @@ static inline int deadline_check_fifo(struct deadline_data *dd, int ddir)
 	/*
 	 * rq is expired!
 	 */
-	if (time_after_eq(jiffies, rq->fifo_time))
+	if (time_after_eq(jiffies, (unsigned long)rq->fifo_time))
 		return 1;
 
 	return 0;
@@ -379,13 +377,12 @@ deadline_var_show(int var, char *page)
 	return sprintf(page, "%d\n", var);
 }
 
-static ssize_t
-deadline_var_store(int *var, const char *page, size_t count)
+static void
+deadline_var_store(int *var, const char *page)
 {
 	char *p = (char *) page;
 
 	*var = simple_strtol(p, &p, 10);
-	return count;
 }
 
 #define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
@@ -409,7 +406,7 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 {									\
 	struct deadline_data *dd = e->elevator_data;			\
 	int __data;							\
-	int ret = deadline_var_store(&__data, (page), count);		\
+	deadline_var_store(&__data, (page));				\
 	if (__data < (MIN))						\
 		__data = (MIN);						\
 	else if (__data > (MAX))					\
@@ -418,7 +415,7 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 		*(__PTR) = msecs_to_jiffies(__data);			\
 	else								\
 		*(__PTR) = __data;					\
-	return ret;							\
+	return count;							\
 }
 STORE_FUNCTION(deadline_read_expire_store, &dd->fifo_expire[READ], 0, INT_MAX, 1);
 STORE_FUNCTION(deadline_write_expire_store, &dd->fifo_expire[WRITE], 0, INT_MAX, 1);

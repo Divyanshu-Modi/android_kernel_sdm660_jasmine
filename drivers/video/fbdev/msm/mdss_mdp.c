@@ -61,7 +61,7 @@
 #include "mdss_mdp_trace.h"
 
 #define AXI_HALT_TIMEOUT_US	0x4000
-#define AUTOSUSPEND_TIMEOUT_MS	200
+#define AUTOSUSPEND_TIMEOUT_MS	50
 #define DEFAULT_MDP_PIPE_WIDTH	2048
 #define RES_1080p		(1088*1920)
 #define RES_UHD			(3840*2160)
@@ -2187,6 +2187,8 @@ static void mdss_mdp_hw_rev_caps_init(struct mdss_data_type *mdata)
 	case MDSS_MDP_HW_REV_320:
 		mdss_set_quirk(mdata, MDSS_QUIRK_DSC_RIGHT_ONLY_PU);
 		mdss_set_quirk(mdata, MDSS_QUIRK_DSC_2SLICE_PU_THRPUT);
+//enable HDR for SDM660
+		mdss_set_quirk(mdata, MDSS_QUIRK_HDR_SUPPORT_ENABLED);
 	case MDSS_MDP_HW_REV_330:
 		mdata->max_target_zorder = 7; /* excluding base layer */
 		mdata->max_cursor_size = 512;

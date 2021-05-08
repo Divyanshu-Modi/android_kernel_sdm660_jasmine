@@ -1,4 +1,5 @@
 /* Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +35,7 @@
 #include "mdss_debug.h"
 #include "mdss_dsi_phy.h"
 #include "mdss_dba_utils.h"
+#include "mdss_livedisplay.h"
 
 #define CMDLINE_DSI_CTL_NUM_STRING_LEN 2
 
@@ -3112,6 +3114,9 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 					rc);
 		}
 		break;
+	case MDSS_EVENT_UPDATE_LIVEDISPLAY:
+		rc = mdss_livedisplay_update(ctrl_pdata, (int)(unsigned long) arg);
+		break;
 	default:
 		pr_debug("%s: unhandled event=%d\n", __func__, event);
 		break;
@@ -4541,6 +4546,7 @@ static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 						__func__, __LINE__);
 	pdata->panel_te_gpio = ctrl_pdata->disp_te_gpio;
 
+#ifndef CONFIG_MACH_XIAOMI_CLOVER
 	ctrl_pdata->bklt_en_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 		"qcom,platform-bklight-en-gpio", 0);
 	if (!gpio_is_valid(ctrl_pdata->bklt_en_gpio))
@@ -4549,6 +4555,7 @@ static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 	ctrl_pdata->bklt_en_gpio_invert =
 			of_property_read_bool(ctrl_pdev->dev.of_node,
 				"qcom,platform-bklight-en-gpio-invert");
+#endif
 
 	ctrl_pdata->avdd_en_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 			"qcom,platform-avdd-en-gpio", 0);
@@ -4564,6 +4571,14 @@ static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 	if (!gpio_is_valid(ctrl_pdata->rst_gpio))
 		pr_err("%s:%d, reset gpio not specified\n",
 						__func__, __LINE__);
+
+#ifdef CONFIG_MACH_MI
+	ctrl_pdata->tp_rst_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
+			 "qcom,platform-tp-reset-gpio", 0);
+	if (!gpio_is_valid(ctrl_pdata->tp_rst_gpio))
+		pr_err("%s:%d, tp reset gpio not specified\n",
+						__func__, __LINE__);
+#endif
 
 	ctrl_pdata->lcd_mode_sel_gpio = of_get_named_gpio(
 			ctrl_pdev->dev.of_node, "qcom,panel-mode-gpio", 0);

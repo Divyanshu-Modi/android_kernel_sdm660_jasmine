@@ -25,6 +25,8 @@
 #include <linux/delay.h>
 #include <linux/input/qpnp-power-on.h>
 #include <linux/of_address.h>
+#include <linux/syscalls.h>
+#include <linux/workqueue.h>
 
 #include <asm/cacheflush.h>
 #include <asm/system_misc.h>
@@ -63,6 +65,19 @@ static void scm_disable_sdi(void);
  * So the SDI cannot be re-enabled when it already by-passed.
 */
 
+static int in_panic;
+
+static int panic_prep_restart(struct notifier_block *this,
+			      unsigned long event, void *ptr)
+{
+	in_panic = 1;
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block panic_blk = {
+	.notifier_call	= panic_prep_restart,
+};
+
 #ifdef CONFIG_QCOM_DLOAD_MODE
 #define EDL_MODE_PROP "qcom,msm-imem-emergency_download_mode"
 #define DL_MODE_PROP "qcom,msm-imem-download_mode"
@@ -70,7 +85,6 @@ static void scm_disable_sdi(void);
 #define KASLR_OFFSET_PROP "qcom,msm-imem-kaslr_offset"
 #endif
 
-static int in_panic;
 static int dload_type = SCM_DLOAD_FULLDUMP;
 static int download_mode = 1;
 static struct kobject dload_kobj;
@@ -99,17 +113,6 @@ struct reset_attribute {
 
 module_param_call(download_mode, dload_set, param_get_int,
 			&download_mode, 0644);
-
-static int panic_prep_restart(struct notifier_block *this,
-			      unsigned long event, void *ptr)
-{
-	in_panic = 1;
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block panic_blk = {
-	.notifier_call	= panic_prep_restart,
-};
 
 int scm_set_dload_mode(int arg1, int arg2)
 {
@@ -279,8 +282,7 @@ static void msm_restart_prepare(const char *cmd)
 	 * Kill download mode if master-kill switch is set
 	 */
 
-	set_dload_mode(download_mode &&
-			(in_panic || restart_mode == RESTART_DLOAD));
+	set_dload_mode(false);
 #endif
 
 	if (qpnp_pon_check_hard_reset_stored()) {
@@ -294,6 +296,10 @@ static void msm_restart_prepare(const char *cmd)
 				(cmd != NULL && cmd[0] != '\0'));
 	}
 
+#ifdef CONFIG_QCOM_PRESERVE_MEM
+	need_warm_reset = true;
+#endif
+
 	/* Hard reset the PMIC unless memory contents must be maintained. */
 	if (need_warm_reset) {
 		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
@@ -301,7 +307,16 @@ static void msm_restart_prepare(const char *cmd)
 		qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
 	}
 
+#ifdef CONFIG_MACH_XIAOMI_CLOVER
+	if (in_panic) {
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+		qpnp_pon_set_restart_reason(
+			PON_RESTART_REASON_PANIC);
+		__raw_writel(0x77665508, restart_reason);
+	} else if (cmd != NULL) {
+#else
 	if (cmd != NULL) {
+#endif
 		if (!strncmp(cmd, "bootloader", 10)) {
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_BOOTLOADER);
@@ -314,10 +329,12 @@ static void msm_restart_prepare(const char *cmd)
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_RTC);
 			__raw_writel(0x77665503, restart_reason);
+#if 0
 		} else if (!strcmp(cmd, "dm-verity device corrupted")) {
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_DMVERITY_CORRUPTED);
 			__raw_writel(0x77665508, restart_reason);
+#endif
 		} else if (!strcmp(cmd, "dm-verity enforcing")) {
 			qpnp_pon_set_restart_reason(
 				PON_RESTART_REASON_DMVERITY_ENFORCE);
@@ -352,9 +369,26 @@ static void msm_restart_prepare(const char *cmd)
 			}
 		} else if (!strncmp(cmd, "edl", 3)) {
 			enable_emergency_dload_mode();
+#ifdef CONFIG_MACH_XIAOMI_CLOVER
+		} else if (!strcmp(cmd, "other")) {
+			qpnp_pon_set_restart_reason(
+				PON_RESTART_REASON_OTHER);
+			__raw_writel(0x77665501, restart_reason);
+#endif
 		} else {
+#if defined(CONFIG_MACH_LONGCHEER) || defined(CONFIG_MACH_XIAOMI_CLOVER)
+			qpnp_pon_set_restart_reason(PON_RESTART_REASON_NORMAL);
+#endif
 			__raw_writel(0x77665501, restart_reason);
 		}
+#if defined(CONFIG_MACH_LONGCHEER) || defined(CONFIG_MACH_XIAOMI_CLOVER)
+	} else if (in_panic) {
+		qpnp_pon_set_restart_reason(PON_RESTART_REASON_PANIC);
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+	} else {
+		qpnp_pon_set_restart_reason(PON_RESTART_REASON_NORMAL);
+		__raw_writel(0x77665501, restart_reason);
+#endif
 	}
 
 	flush_cache_all();
@@ -390,9 +424,31 @@ static void deassert_ps_hold(void)
 	__raw_writel(0, msm_ps_hold);
 }
 
+#define FS_SYNC_TIMEOUT_MS 5000
+static struct work_struct fs_sync_work;
+static DECLARE_COMPLETION(sync_compl);
+
+static void fs_sync_work_func(struct work_struct *work)
+{
+	pr_emerg("sys_sync: Syncing fs\n");
+	sys_sync();
+	complete(&sync_compl);
+}
+
+void exec_fs_sync_work(void)
+{
+	INIT_WORK(&fs_sync_work, fs_sync_work_func);
+	reinit_completion(&sync_compl);
+	schedule_work(&fs_sync_work);
+	if (wait_for_completion_timeout(&sync_compl, msecs_to_jiffies(FS_SYNC_TIMEOUT_MS)) == 0)
+		pr_emerg("sys_sync: Timeout\n");
+}
+
 static void do_msm_restart(enum reboot_mode reboot_mode, const char *cmd)
 {
 	pr_notice("Going down for restart now\n");
+
+	exec_fs_sync_work();
 
 	msm_restart_prepare(cmd);
 
@@ -417,9 +473,15 @@ static void do_msm_poweroff(void)
 {
 	pr_notice("Powering off the SoC\n");
 
+	exec_fs_sync_work();
+
 	set_dload_mode(0);
 	scm_disable_sdi();
 	qpnp_pon_system_pwr_off(PON_POWER_OFF_SHUTDOWN);
+#ifdef CONFIG_MACH_XIAOMI_CLOVER
+	qpnp_pon_set_restart_reason(PON_RESTART_REASON_UNKNOWN);
+	__raw_writel(0x0, restart_reason);
+#endif
 
 	halt_spmi_pmic_arbiter();
 	deassert_ps_hold();
@@ -565,11 +627,12 @@ static int msm_restart_probe(struct platform_device *pdev)
 	struct device_node *np;
 	int ret = 0;
 
+	atomic_notifier_chain_register(&panic_notifier_list, &panic_blk);
+
 #ifdef CONFIG_QCOM_DLOAD_MODE
 	if (scm_is_call_available(SCM_SVC_BOOT, SCM_DLOAD_CMD) > 0)
 		scm_dload_supported = true;
 
-	atomic_notifier_chain_register(&panic_notifier_list, &panic_blk);
 	np = of_find_compatible_node(NULL, NULL, DL_MODE_PROP);
 	if (!np) {
 		pr_err("unable to find DT imem DLOAD mode node\n");
@@ -660,6 +723,11 @@ skip_sysfs_create:
 					   "tcsr-boot-misc-detect");
 	if (mem)
 		tcsr_boot_misc_detect = mem->start;
+
+#ifdef CONFIG_MACH_XIAOMI_CLOVER
+	qpnp_pon_set_restart_reason(PON_RESTART_REASON_UNKNOWN);
+	__raw_writel(0x77665510, restart_reason);
+#endif
 
 	pm_power_off = do_msm_poweroff;
 	arm_pm_restart = do_msm_restart;

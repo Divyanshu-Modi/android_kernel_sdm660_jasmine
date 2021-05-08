@@ -264,6 +264,10 @@ struct request *blk_mq_alloc_request(struct request_queue *q, int rw, gfp_t gfp,
 		blk_queue_exit(q);
 		return ERR_PTR(-EWOULDBLOCK);
 	}
+
+	rq->__data_len = 0;
+	rq->__sector = (sector_t) -1;
+	rq->bio = rq->biotail = NULL;
 	return rq;
 }
 EXPORT_SYMBOL(blk_mq_alloc_request);
@@ -607,8 +611,6 @@ static void blk_mq_check_expired(struct blk_mq_hw_ctx *hctx,
 		}
 		return;
 	}
-	if (rq->cmd_flags & REQ_NO_TIMEOUT)
-		return;
 
 	if (time_after_eq(jiffies, rq->deadline)) {
 		if (!blk_mark_rq_complete(rq))
@@ -628,6 +630,22 @@ static void blk_mq_rq_timer(unsigned long priv)
 	};
 	int i;
 
+	/* A deadlock might occur if a request is stuck requiring a
+	 * timeout at the same time a queue freeze is waiting
+	 * completion, since the timeout code would not be able to
+	 * acquire the queue reference here.
+	 *
+	 * That's why we don't use blk_queue_enter here; instead, we use
+	 * percpu_ref_tryget directly, because we need to be able to
+	 * obtain a reference even in the short window between the queue
+	 * starting to freeze, by dropping the first reference in
+	 * blk_mq_freeze_queue_start, and the moment the last request is
+	 * consumed, marked by the instant q_usage_counter reaches
+	 * zero.
+	 */
+	if (!percpu_ref_tryget(&q->q_usage_counter))
+		return;
+
 	blk_mq_queue_tag_busy_iter(q, blk_mq_check_expired, &data);
 
 	if (data.next_set) {
@@ -642,6 +660,7 @@ static void blk_mq_rq_timer(unsigned long priv)
 				blk_mq_tag_idle(hctx);
 		}
 	}
+	blk_queue_exit(q);
 }
 
 /*
@@ -1116,8 +1135,7 @@ static void blk_mq_bio_to_request(struct request *rq, struct bio *bio)
 {
 	init_request_from_bio(rq, bio);
 
-	if (blk_do_io_stat(rq))
-		blk_account_io_start(rq, 1);
+	blk_account_io_start(rq, 1);
 }
 
 static inline bool hctx_allow_merges(struct blk_mq_hw_ctx *hctx)
@@ -1378,6 +1396,13 @@ static blk_qc_t blk_sq_make_request(struct request_queue *q, struct bio *bio)
 	plug = current->plug;
 	if (plug) {
 		blk_mq_bio_to_request(rq, bio);
+
+		/*
+		 * @request_count may become stale because of schedule
+		 * out, so check the list again.
+		 */
+		if (list_empty(&plug->mq_list))
+			request_count = 0;
 		if (!request_count)
 			trace_block_plug(q);
 
@@ -1491,7 +1516,7 @@ static struct blk_mq_tags *blk_mq_init_rq_map(struct blk_mq_tag_set *set,
 		int to_do;
 		void *p;
 
-		while (left < order_to_size(this_order - 1) && this_order)
+		while (this_order && left < order_to_size(this_order - 1))
 			this_order--;
 
 		do {

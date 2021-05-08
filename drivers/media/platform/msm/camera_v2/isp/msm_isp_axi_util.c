@@ -563,8 +563,13 @@ static void msm_isp_cfg_framedrop_reg(
 	if (!runtime_init_frame_drop)
 		framedrop_period = stream_info->current_framedrop_period;
 
-	if (MSM_VFE_STREAM_STOP_PERIOD != framedrop_period)
+	if (MSM_VFE_STREAM_STOP_PERIOD != framedrop_period) {
 		framedrop_pattern = 0x1;
+#ifdef CONFIG_MACH_LONGCHEER
+		if (framedrop_period > 1)
+			framedrop_pattern = framedrop_pattern << (framedrop_period-1);
+#endif
+	}
 
 	BUG_ON(0 == framedrop_period);
 	for (i = 0; i < stream_info->num_isp; i++) {
@@ -3592,6 +3597,7 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 	uint32_t wm_mask = 0;
 	int vfe_idx;
 	uint32_t pingpong_bit = 0;
+	uint32_t do_drop_frame;
 
 	if (!vfe_dev || !stream_info) {
 		pr_err("%s %d failed: vfe_dev %pK stream_info %pK\n", __func__,
@@ -3614,7 +3620,7 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 		vfe_ops.axi_ops.get_pingpong_status(vfe_dev);
 
 	/* As MCT is still processing it, need to drop the additional requests*/
-	if (vfe_dev->isp_page->drop_reconfig) {
+	if (vfe_dev->isp_page->drop_reconfig && do_drop_frame) {
 		pr_err("%s: MCT has not yet delayed %d drop request %d\n",
 			__func__, vfe_dev->isp_page->drop_reconfig, frame_id);
 		goto error;
@@ -3636,7 +3642,11 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 		) {
 		pr_debug("%s:%d invalid time to request frame %d try drop_reconfig\n",
 			__func__, __LINE__, frame_id);
+#ifdef CONFIG_MACH_XIAOMI_JASON
+		goto error;
+#else
 		vfe_dev->isp_page->drop_reconfig = 1;
+		do_drop_frame = 1;
 		return 0;
 	} else if ((vfe_dev->axi_data.src_info[frame_src].active) &&
 			((frame_id ==
@@ -3645,11 +3655,13 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 			(stream_info->undelivered_request_cnt <=
 				MAX_BUFFERS_IN_HW)) {
 		vfe_dev->isp_page->drop_reconfig = 1;
+		do_drop_frame = 0;
 		pr_debug("%s: vfe_%d request_frame %d cur frame id %d pix %d try drop_reconfig\n",
 			__func__, vfe_dev->pdev->id, frame_id,
 			vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id,
 			vfe_dev->axi_data.src_info[VFE_PIX_0].active);
 		return 0;
+#endif
 	} else if ((vfe_dev->axi_data.src_info[frame_src].active && (frame_id !=
 		vfe_dev->axi_data.src_info[frame_src].frame_id + vfe_dev->
 		axi_data.src_info[frame_src].sof_counter_step)) ||
@@ -3681,7 +3693,18 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 			__func__, __LINE__, vfe_dev->pdev->id, frame_id,
 			stream_info->activated_framedrop_period,
 			stream_info->stream_id);
+#ifdef CONFIG_MACH_XIAOMI_JASON
+		rc = msm_isp_return_empty_buffer(vfe_dev, stream_info,
+			user_stream_id, frame_id, buf_index, frame_src);
+		if (rc < 0)
+			pr_err("%s:%d failed: return_empty_buffer src %d\n",
+				__func__, __LINE__, frame_src);
+		stream_info->current_framedrop_period =
+			MSM_VFE_STREAM_STOP_PERIOD;
+		msm_isp_cfg_framedrop_reg(stream_info);
+#else
 		vfe_dev->isp_page->drop_reconfig = 1;
+#endif
 		return 0;
 	}
 
@@ -4022,6 +4045,10 @@ int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg)
 			UPDATE_STREAM_REQUEST_FRAMES &&
 			update_cmd->update_type !=
 			UPDATE_STREAM_REMOVE_BUFQ &&
+#ifdef CONFIG_MACH_LONGCHEER
+			update_cmd->update_type !=
+                        UPDATE_STREAM_REQUEST_FRAMES_VER2 &&
+#endif
 			update_cmd->update_type !=
 			UPDATE_STREAM_SW_FRAME_DROP) {
 			pr_err("%s: Invalid stream state %d, update cmd %d\n",

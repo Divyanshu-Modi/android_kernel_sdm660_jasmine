@@ -851,7 +851,8 @@ static const char *flush_info(unsigned int feature_flush)
 
 static void xlvbd_flush(struct blkfront_info *info)
 {
-	blk_queue_flush(info->rq, info->feature_flush);
+	blk_queue_write_cache(info->rq, info->feature_flush & REQ_FLUSH,
+				info->feature_flush & REQ_FUA);
 	pr_info("blkfront: %s: %s %s %s %s %s\n",
 		info->gd->disk_name, flush_info(info->feature_flush),
 		"persistent grants:", info->feature_persistent ?
@@ -952,8 +953,8 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
 	if (!VDEV_IS_EXTENDED(info->vdevice)) {
 		err = xen_translate_vdev(info->vdevice, &minor, &offset);
 		if (err)
-			return err;		
- 		nr_parts = PARTS_PER_DISK;
+			return err;
+		nr_parts = PARTS_PER_DISK;
 	} else {
 		minor = BLKIF_MINOR_EXT(info->vdevice);
 		nr_parts = PARTS_PER_EXT_DISK;
